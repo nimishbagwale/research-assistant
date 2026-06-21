@@ -38,11 +38,12 @@ _load_sessions_from_disk()
 
 # ── public API ──────────────────────────────────────────────────────────────
 
-def create_session() -> str:
+def create_session(user_id: str = "anonymous") -> str:
     """Create a new empty session, persist it, return its id."""
     sid = str(uuid.uuid4())
     session = {
         "id": sid,
+        "user_id": user_id,
         "title": "",
         "date": datetime.now().strftime("%m/%d/%Y"),
         "created_at": datetime.now().isoformat(),
@@ -82,6 +83,15 @@ def delete_session(session_id: str) -> bool:
 def get_all_sessions() -> list:
     """Return all sessions sorted newest first."""
     return sorted(_sessions.values(), key=lambda s: s.get("created_at", ""), reverse=True)
+
+
+def get_sessions_by_user(user_id: str) -> list:
+    """Return only sessions belonging to this user, newest first."""
+    return sorted(
+        [s for s in _sessions.values() if s.get("user_id", "anonymous") == user_id],
+        key=lambda s: s.get("created_at", ""),
+        reverse=True
+    )
 
 
 def get_session_history(session_id: str) -> list:

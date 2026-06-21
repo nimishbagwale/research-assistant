@@ -1,16 +1,17 @@
 import json
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import Optional
 from main import run, run_stream
 from memory.memory_manager import (
     create_session,
     append_to_session,
-    get_all_sessions,
+    get_sessions_by_user,
     get_session_history,
     delete_session,
-    store_episode,   # kept for /clear backward compat
+    store_episode,
 )
 from settings import BASE_MODEL
 
@@ -22,20 +23,22 @@ class QueryRequest(BaseModel):
     query: str
     session_id: str = ""
     mode: str = "deep"
+    user_id: Optional[str] = "anonymous"
+
+class NewSessionRequest(BaseModel):
+    user_id: Optional[str] = "anonymous"
 
 
 # ── Session management ───────────────────────────────────────────────────────
 
 @app.post("/session/new")
-def new_session():
-    """Create a fresh session and return its id to the frontend."""
-    sid = create_session()
+def new_session(req: NewSessionRequest):
+    sid = create_session(user_id=req.user_id)
     return {"session_id": sid}
 
 
 @app.delete("/session/{session_id}")
 def remove_session(session_id: str):
-    """Delete a session from memory and disk."""
     deleted = delete_session(session_id)
     return {"deleted": deleted, "session_id": session_id}
 
@@ -44,7 +47,7 @@ def remove_session(session_id: str):
 
 @app.post("/chat")
 def chat(req: QueryRequest):
-    sid = req.session_id or create_session()
+    sid = req.session_id or create_session(user_id=req.user_id)
     history = get_session_history(sid)
     response, _ = run(req.query, history, mode=req.mode)
     append_to_session(sid, req.query, response)
@@ -53,7 +56,7 @@ def chat(req: QueryRequest):
 
 @app.post("/chat/stream")
 def chat_stream(req: QueryRequest):
-    sid = req.session_id or create_session()
+    sid = req.session_id or create_session(user_id=req.user_id)
     history = get_session_history(sid)
 
     def stream():
@@ -74,14 +77,12 @@ def chat_stream(req: QueryRequest):
 # ── History ──────────────────────────────────────────────────────────────────
 
 @app.get("/history")
-def get_history():
-    """Return all sessions grouped — each session has id, title, date, messages[]."""
-    return {"sessions": get_all_sessions()}
+def get_history(user_id: str = Query(default="anonymous")):
+    return {"sessions": get_sessions_by_user(user_id)}
 
 
 @app.post("/clear")
 def clear_history():
-    """Legacy endpoint."""
     return {"status": "cleared"}
 
 

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import AgentActivity from './components/AgentActivity.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
-import { fetchHistory, postChatStream, newSessionApi, deleteSessionApi, STEP_ORDER } from './api/client.js';
+import { fetchHistory, postChatStream, newSessionApi, deleteSessionApi, STEP_ORDER, getUserId } from './api/client.js';
 
 function now() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -27,6 +27,9 @@ export default function App() {
   const [light, setLight]             = useState(false);
 
   const lastDoneIdxRef = useRef(-1);
+
+  // Initialize user ID on first load
+  useEffect(() => { getUserId(); }, []);
 
   // FIX 4: Apply theme to document root so CSS variables cascade globally
   useEffect(() => {
