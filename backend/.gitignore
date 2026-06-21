@@ -1,0 +1,12 @@
+.env
+.env.production
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+sessions.jsonl
+episodic_history.jsonl
+*.jsonl
+venv/
+.venv/

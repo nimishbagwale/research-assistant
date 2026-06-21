@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+langchain-ollama
+langchain
+groq
+tavily-python
+duckduckgo-search
+beautifulsoup4
+requests
+langgraph

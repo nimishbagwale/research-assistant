@@ -1,0 +1,1349 @@
+analytics_agent.py "from settings import BASE_MODEL
+from state import AgentState
+from tools.llm import generate
+
+def build_context(results: list) -> str:
+    if not results:
+        return ""
+    context = "Previous task results:\n"
+    for r in results:
+        context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
+    return context
+
+def analyze(state: AgentState):
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+
+    context = build_context(state['results'])
+    goal = task.get('goal', '')
+
+    if not context:
+        response = f"Cannot complete analysis: no prior research data available for: {goal}"
+    else:
+        prompt = f"""{context}
+
+Current task: {goal}
+
+Using only the information above, reason through this task. Identify patterns, draw conclusions, compare options, or explain causes as required by the goal. Be specific — reference findings from the data above, don't make unsupported claims."""
+
+        print("Analyzing |", end=" ", flush=True)
+        response = generate(prompt, BASE_MODEL)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": response
+    })
+    state['current_task_index'] = idx + 1
+
+    return state"
+
+conversation_Agent.py "from settings import BASE_MODEL, CHAT_MODEL
+from state import AgentState
+from tools.llm import generate
+from memory.memory_manager import format_history
+
+def build_context(results: list) -> str:
+    if not results:
+        return ""
+    context = "Previous task results:\n"
+    for r in results:
+        context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
+    return context
+
+def build_summarize_prompt(state: AgentState) -> str:
+    subtasks = state['subtasks']
+    idx = len(subtasks) - 1
+    task = subtasks[idx]
+    context = build_context(state['results'])
+    return f"""{context}
+
+Based on the research findings above, write a structured answer using EXACTLY these markdown sections:
+
+## Summary
+Write 2-3 sentences directly answering the query. Add inline citations after each specific claim like this: [https://source.com]
+
+## Key Findings
+List 2-5 distinct key insights as bullet points, each ending with a citation:
+- Insight 1 [https://source.com]
+- Insight 2 [https://source.com]
+(Skip this section entirely if there is only one finding or if this is a simple one-sentence factual query)
+
+## Comparison
+(Include ONLY if the query explicitly compares multiple items, products, options, or candidates)
+Use a clean markdown table. For subjective columns like Performance, Quality, Value: use ★★★★☆ star ratings (5 stars max).
+| Item | Metric1 | Metric2 | Price |
+|------|---------|---------|-------|
+| ...  | ...     | ...     | ...   |
+(Skip this section entirely if not comparing multiple items)
+
+## Sources
+List each unique source URL on its own line:
+- https://source1.com
+- https://source2.com
+
+## Confidence
+High
+
+(Replace "High" with Medium or Low based on source quality and consistency across sources)
+
+Rules:
+- ALWAYS output Summary, Sources, and Confidence sections
+- Use EXACTLY the ## headings shown above — no other headings, no sub-headings
+- Be specific: include names, numbers, dates, specs, and prices where available
+- Every factual claim in Summary and Key Findings MUST have an inline citation [https://url]
+
+Original query: {task.get('goal', '')}"""
+
+def converse(state: AgentState):
+    history = format_history(state.get('chat_history', []))
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+
+    context = build_context(state['results'])
+
+    if context:
+        prompt = f"{history}\nPrevious task results:\n{context}\nCurrent task:\n{task.get('goal', '')}"
+    else:
+        prompt = f"{history}\nGoal:\n{task.get('goal', '')}"
+
+    if task.get("type") == "chat":
+        print("Chat-Replying |", end=" ", flush=True)
+        response = generate(prompt, CHAT_MODEL)
+    else:
+        print("Chat-Replying |", end=" ", flush=True)
+        response = generate(prompt, BASE_MODEL)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": response
+    })
+    state['current_task_index'] = idx + 1
+
+    if task.get("type") in ("chat", "summarize"):
+        state['final_response'] = response
+
+    state['awaiting_clarification'] = False
+    return state
+
+def summarize(state: AgentState):
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+
+    if idx >= len(subtasks):
+        idx = len(subtasks) - 1
+
+    task = subtasks[idx]
+
+    prompt = build_summarize_prompt(state)
+
+    print("Summarizing |", end=" ", flush=True)
+    response = generate(prompt, BASE_MODEL)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": response
+    })
+
+    state['current_task_index'] = idx + 1
+    state['final_response'] = response
+    state['awaiting_clarification'] = False
+    return state
+
+def doubt(state: AgentState):
+    history = format_history(state.get('chat_history', []))
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+
+    goal = task.get('goal', '')
+
+    prompt = f"""{history}
+
+The user's query is ambiguous or missing information needed to proceed.
+
+Ambiguity: {goal}
+
+Ask the user a short, precise clarifying question to resolve this. Reply with ONLY the question — no preamble, no explanation."""
+
+    print("Doubt-Question |", end=" ", flush=True)
+    response = generate(prompt, BASE_MODEL)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": response
+    })
+    state['current_task_index'] = idx + 1
+    state['final_response'] = response
+    state['awaiting_clarification'] = True
+    return state
+"
+
+critic_agent.py "from settings import BASE_MODEL
+from state import AgentState
+from tools.llm import generate
+
+def critic(state: AgentState):
+    final_response = state['final_response']
+    original_query = state['query']
+    max_retries = state.get('critic_retries', 0)
+
+    prompt = f"""You are a quality critic. Score the following answer on a scale of 1-5 based on how well it answers the original query.
+
+Original query: {original_query}
+
+Answer to evaluate:
+{final_response}
+
+Scoring criteria:
+- 5: Complete, specific, accurate, well-structured
+- 4: Good but missing minor details
+- 3: Partially answers the query, some gaps
+- 2: Vague or missing key information
+- 1: Does not answer the query
+
+Reply ONLY with this JSON:
+{{"score": <1-5>, "reason": "<one sentence why>", "revision_instruction": "<what specifically needs to improve, or empty string if score >= 4>"}}"""
+
+    print("Critiquing |", end=" ", flush=True)
+    raw = generate(prompt, BASE_MODEL)
+
+    try:
+        import json
+        raw = raw.strip().strip("```json").strip("```").strip()
+        result = json.loads(raw)
+        score = result.get("score", 3)
+        revision_instruction = result.get("revision_instruction", "")
+    except Exception:
+        score = 4
+        revision_instruction = ""
+
+    state['critic_score'] = score
+    state['critic_retries'] = max_retries + 1
+
+    if score < 4 and max_retries < 2 and revision_instruction:
+        state['results'].append({
+            "task_id": "critic",
+            "type": "critic_feedback",
+            "response": f"Revision needed: {revision_instruction}"
+        })
+        state['needs_revision'] = True
+        state['current_task_index'] = len(state['subtasks']) - 1
+    else:
+        state['needs_revision'] = False
+
+    return state
+"
+
+planner_agent.py "import json
+from tools.llm import generate
+from state import AgentState
+from memory.memory_manager import format_history
+
+def plan_task(state: AgentState):
+    state['critic_retries'] = 0
+    state['needs_revision'] = False
+    state['critic_score'] = 0
+    user_query = state['query']
+    mode = state.get('mode', 'deep')
+    mode_instruction = (
+        "Use at most 1 web_search task and go straight to summarize. Keep it fast."
+        if mode == "quick"
+        else "Use web_search + analytical + summarize as needed for a thorough answer."
+    )
+
+    history = format_history(state.get('chat_history', []))
+
+    prompt = f"""{history}
+You are a research planner for an AI assistant. Break the user query into 2-4 subtasks.
+
+Each subtask is a JSON object with:
+- id: task number
+- goal: one clear sentence — what to find or do
+- type: "chat" | "web_search" | "analytical" | "summarize" | "doubt" | "self_ask" | "tool_use"
+
+Type rules:
+- "chat"       → casual conversation (greetings, small talk, opinions). Return ONLY one task of this type, no others.
+- "web_search" → needs real-time or recent data (news, stats, current events, product info, recommendations, lists, comparisons, how-to guides)
+- "analytical" → needs reasoning over already-retrieved data (why, compare, evaluate, what causes)
+- "tool_use"   → needs a calculator, code execution, currency conversion, or the current date/time
+- "summarize"  → condenses all previous task results into a final answer. ALWAYS the last task unless type is "chat".
+- "doubt"      → ONLY when the query is completely unanswerable without knowing more (e.g. "help me with my project" — no domain given). Do NOT use for anything searchable.
+- "self_ask"   → complex exploratory queries needing background context before searching
+
+Rules:
+- If query is casual → single "chat" task
+- If query asks for a list, steps, recommendation, comparison, or how-to → ALWAYS use web_search, never doubt
+- If query needs math/code/currency/date → use tool_use, not web_search
+- Never use more than 2 web_search tasks
+- analytical tasks must come AFTER web_search tasks
+- Prescribed mode: {mode_instruction}
+
+CRITICAL — Summarize task goal:
+The "summarize" task goal MUST include:
+  1. The original user's output format (e.g. "in ten steps", "as a table", "bullet list", "comparison")
+  2. The core topic being summarised
+  Example: if user asked "in ten steps how to build X", the summarize goal must say
+  "Summarise findings into a ten-step guide on how to build X"
+
+Return ONLY a JSON array. No explanation, no markdown.
+
+Examples:
+
+User: "hey what's up"
+[
+  {{"id": 1, "goal": "Respond naturally to a casual greeting", "type": "chat"}}
+]
+
+User: "latest trends in generative AI"
+[
+  {{"id": 1, "goal": "Find the most recent developments and trends in generative AI 2025-2026", "type": "web_search"}},
+  {{"id": 2, "goal": "Analyse which generative AI trends are most impactful and why", "type": "analytical"}},
+  {{"id": 3, "goal": "Summarise findings into a clear answer covering the key generative AI trends", "type": "summarize"}}
+]
+
+User: "in ten steps how to build a RAG project to get hired"
+[
+  {{"id": 1, "goal": "Find how to build a Retrieval-Augmented Generation (RAG) project: architecture, components, best practices 2025", "type": "web_search"}},
+  {{"id": 2, "goal": "Find what RAG project features and skills employers look for in AI/ML job applications", "type": "web_search"}},
+  {{"id": 3, "goal": "Summarise findings into a ten-step guide for building an impressive RAG project that helps get hired at top tech companies", "type": "summarize"}}
+]
+
+User: "give me 3 good laptops for gaming in 2026"
+[
+  {{"id": 1, "goal": "Find the best gaming laptops to buy in 2026 with specs and prices", "type": "web_search"}},
+  {{"id": 2, "goal": "Summarise the top 3 gaming laptop recommendations with key specs and reasons", "type": "summarize"}}
+]
+
+User: "what's 18% of 4500, and convert that to INR at 1 USD = 83.2 INR"
+[
+  {{"id": 1, "goal": "Calculate 18% of 4500 and convert the result from USD to INR using the given rate", "type": "tool_use"}},
+  {{"id": 2, "goal": "Summarise the calculation result for the user", "type": "summarize"}}
+]
+
+User: "help me with my project"
+[
+  {{"id": 1, "goal": "Ask the user what their project is about and what kind of help they need", "type": "doubt"}}
+]
+
+User query: {user_query}
+"""
+
+    print("Planning |", end=" ", flush=True)
+    raw = generate(prompt)
+    raw = raw.strip().strip("```json").strip("```").strip()
+
+    try:
+        subtasks = json.loads(raw)
+    except json.JSONDecodeError:
+        subtasks = [
+            {"id": 1, "goal": user_query, "type": "web_search"},
+            {"id": 2, "goal": f"Summarise findings for: {user_query}", "type": "summarize"}
+        ]
+
+    state['subtasks'] = subtasks
+    state['current_task_index'] = 0
+    state['results'] = []
+    return state"
+
+research_agent.py "from state import AgentState
+from tools.llm import generate
+from tools.webSurfing import search_web
+from settings import BASE_MODEL
+import json
+
+def is_bad_result(raw: str) -> bool:
+    if not raw or len(raw.strip()) < 100:
+        return True
+    bad_signals = ["search failed", "could not fetch", "no results", "error"]
+    return any(signal in raw.lower() for signal in bad_signals)
+
+def rephrase_query(goal: str, original_query: str) -> str:
+    prompt = f"""The following search query returned poor results: "{goal}"
+
+Original user question for context: "{original_query}"
+
+Rewrite it as a better, more specific web search query. Return ONLY the new query, nothing else."""
+    return generate(prompt, BASE_MODEL)
+
+def expand_queries(goal: str, original_query: str) -> list[str]:
+    """Generate 3 diverse search queries. Pass the original user query for full context."""
+    prompt = f"""You are helping research the following goal for a user's question.
+
+Original user question: "{original_query}"
+Current research goal: "{goal}"
+
+Generate 3 different web search queries to research this goal from different angles.
+Make sure the queries are specific and technical where the topic is technical (e.g. RAG = Retrieval-Augmented Generation, LLM = Large Language Model).
+Return ONLY a JSON array of 3 strings. No explanation, no markdown.
+Example: ["query one", "query two", "query three"]"""
+
+    raw = generate(prompt, BASE_MODEL)
+    raw = raw.strip().strip("```json").strip("```").strip()
+    try:
+        queries = json.loads(raw)
+        return queries if isinstance(queries, list) else [goal]
+    except Exception:
+        return [goal]
+
+def build_context(results: list) -> str:
+    if not results:
+        return ""
+    context = "Previous task results:\n"
+    for r in results:
+        context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
+    return context
+
+def research(state: AgentState):
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+
+    context = build_context(state['results'])
+    goal = task.get('goal', '')
+    original_query = state.get('query', goal)   # full original user query for context
+
+    if state['mode'] == "deep":
+        print("Expanding-Queries |", end=" ", flush=True)
+        queries = expand_queries(goal, original_query)
+    else:
+        queries = [goal]
+
+    print("Searching-Web |", end=" ", flush=True)
+    all_results = []
+    for q in queries:
+        result = search_web(q, 3)
+        if result and "Search failed" not in result:
+            all_results.append(result)
+
+    raw_results = "\n\n---\n\n".join(all_results) if all_results else search_web(goal, 4)
+
+    if is_bad_result(raw_results):
+        print("Replanning-Query |", end=" ", flush=True)
+        rephrased = rephrase_query(goal, original_query)
+        raw_results = search_web(rephrased, 4)
+
+    prompt = f"""{context}
+
+Search results for current task:
+{raw_results}
+
+Current task: {goal}
+Original user question: {original_query}
+
+Extract and summarise only the information relevant to the current task from the search results above.
+Respect the context of the original user question when selecting what is relevant.
+At the end, list all URLs found in the search results under a "Sources:" section.
+
+Format:
+<your summary>
+
+Sources:
+- <url1>
+- <url2>"""
+
+    print("Extracting-Searches |", end=" ", flush=True)
+    response = generate(prompt, BASE_MODEL)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": response
+    })
+    state['current_task_index'] = idx + 1
+
+    return state"
+
+router_agent.py "from state import AgentState
+
+def router(state: AgentState):
+    if state.get('awaiting_clarification'):
+        return "END"
+
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    
+    if idx >= len(subtasks):
+        return "END"
+    
+    current = subtasks[idx]
+    task_type = current.get('type', 'doubt')
+    
+    if task_type == "chat":
+        return "CHAT"
+    elif task_type == "web_search":
+        return "WEB_SEARCH"
+    elif task_type == "self_ask":
+        return "SELF_ASK"
+    elif task_type == "analytical":
+        return "ANALYTICAL"
+    elif task_type == "tool_use":
+        return "TOOL_USE"
+    elif task_type == "summarize":
+        return "SUMMARIZE"
+    elif task_type == "doubt":
+        return "DOUBT"
+    else:
+        return "CONVO""
+
+self_ask_agent.py "import json
+from tools.llm import generate
+from state import AgentState
+from settings import BASE_MODEL
+from tools.webSurfing import search_web
+
+def self_ask(state: AgentState):
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+    goal = task.get('goal', '')
+
+    # Step 1: generate sub-questions
+    prompt = f"""To thoroughly research the following query, what are the 3 most important sub-questions that need to be answered first?
+
+Query: {goal}
+
+Return ONLY a JSON array of 3 strings. No explanation, no markdown.
+Example: ["sub-question 1", "sub-question 2", "sub-question 3"]"""
+
+    print("Self-Asking |", end=" ", flush=True)
+    raw = generate(prompt, BASE_MODEL)
+    raw = raw.strip().strip("```json").strip("```").strip()
+
+    try:
+        sub_questions = json.loads(raw)
+    except Exception:
+        sub_questions = [goal]
+
+    # Step 2: answer each sub-question via search
+    sub_answers = []
+    for q in sub_questions:
+        result = search_web(q, 2)
+        sub_answers.append(f"Q: {q}\nA: {result[:500] if result else 'No data found'}")
+
+    combined = "\n\n".join(sub_answers)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": f"Sub-question research:\n{combined}"
+    })
+    state['current_task_index'] = idx + 1
+    return state"
+
+tool_agent.py "import json
+
+from settings import BASE_MODEL
+from state import AgentState
+from tools.llm import generate
+from tools.registry import run_tool, tool_descriptions
+
+MAX_TOOL_ROUNDS = 4
+
+
+def build_context(results: list) -> str:
+    if not results:
+        return ""
+    context = "Previous task results:\n"
+    for r in results:
+        context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
+    return context
+
+
+def build_decision_prompt(goal: str, context: str, call_log: list) -> str:
+    history = "\n".join(call_log) if call_log else "(none yet)"
+    return f"""{context}
+
+Available tools:
+{tool_descriptions()}
+
+Current task: {goal}
+
+Tool calls made so far this task:
+{history}
+
+Decide your next step. Reply with ONLY one JSON object, no explanation, no markdown.
+- To call a tool: {{"tool": "<tool_name>", "args": {{...}}}}
+- If you already have enough information to answer: {{"tool": null, "answer": "<final answer>"}}
+"""
+
+
+def safe_json_parse(raw: str) -> dict:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"tool": None, "answer": cleaned}
+    except Exception:
+        return {"tool": None, "answer": cleaned}
+
+
+def tool_use(state: AgentState):
+    subtasks = state['subtasks']
+    idx = state['current_task_index']
+    task = subtasks[idx]
+    goal = task.get('goal', '')
+
+    context = build_context(state['results'])
+    call_log = []
+    final_answer = None
+
+    for round_num in range(MAX_TOOL_ROUNDS):
+        print(f"Tool-Deciding (round {round_num + 1}) |", end=" ", flush=True)
+        prompt = build_decision_prompt(goal, context, call_log)
+        raw = generate(prompt, BASE_MODEL)
+        decision = safe_json_parse(raw)
+
+        tool_name = decision.get("tool")
+        if not tool_name:
+            final_answer = decision.get("answer", "") or "\n".join(call_log)
+            break
+
+        args = decision.get("args", {}) or {}
+        print(f"Calling-Tool({tool_name}) |", end=" ", flush=True)
+        result = run_tool(tool_name, args)
+        call_log.append(f"Called {tool_name}({args}) -> {result}")
+
+    if final_answer is None:
+        final_answer = "Reached tool-call limit without a final answer.\n" + "\n".join(call_log)
+
+    state['results'].append({
+        "task_id": task.get("id"),
+        "type": task.get("type"),
+        "response": final_answer
+    })
+    state['current_task_index'] = idx + 1
+    return state"
+
+builder.py "from langgraph.graph import StateGraph, END
+from agents.planner_agent import plan_task
+from agents.router_agent import router
+from state import AgentState
+from agents.conversation_agent import converse, summarize, doubt
+from agents.research_agent import research
+from agents.analytics_agent import analyze
+from agents.critic_agent import critic
+from agents.self_ask_agent import self_ask
+from agents.tool_agent import tool_use
+
+def critic_router(state: AgentState):
+    if state.get('needs_revision'):
+        return "SUMMARIZER"   # loop back for revision
+    return "END"
+
+def build_graph():
+    graph = StateGraph(AgentState)
+
+    graph.add_node("PLANNER", plan_task)
+    graph.add_node("WEB_SEARCH", research)
+    graph.add_node("ANALYTICAL", analyze)
+    graph.add_node("SUMMARIZER", summarize)
+    graph.add_node("CHAT", converse)
+    graph.add_node("DOUBT", doubt)
+    graph.add_node("CRITIC", critic)        
+    graph.add_node("SELF_ASK", self_ask)
+    graph.add_node("TOOL_USE", tool_use)
+
+    graph.set_entry_point("PLANNER")
+
+    graph.add_conditional_edges("PLANNER", router, {
+        "WEB_SEARCH": "WEB_SEARCH",
+        "ANALYTICAL": "ANALYTICAL",
+        "CHAT": "CHAT",
+        "SELF_ASK": "SELF_ASK",
+        "TOOL_USE": "TOOL_USE",
+        "SUMMARIZE": "SUMMARIZER",
+        "DOUBT": "DOUBT",
+        "END": END,
+    })
+
+    graph.add_conditional_edges("SELF_ASK", router, {
+        "WEB_SEARCH": "WEB_SEARCH",
+        "TOOL_USE": "TOOL_USE",
+        "SUMMARIZE": "SUMMARIZER",
+        "END": END,
+    })
+
+    graph.add_conditional_edges("WEB_SEARCH", router, {
+        "WEB_SEARCH": "WEB_SEARCH",
+        "ANALYTICAL": "ANALYTICAL",
+        "TOOL_USE": "TOOL_USE",
+        "SUMMARIZE": "SUMMARIZER",
+        "DOUBT": "DOUBT",
+        "END": END,
+    })
+
+    graph.add_conditional_edges("ANALYTICAL", router, {
+        "WEB_SEARCH": "WEB_SEARCH",
+        "ANALYTICAL": "ANALYTICAL",
+        "TOOL_USE": "TOOL_USE",
+        "SUMMARIZE": "SUMMARIZER",
+        "DOUBT": "DOUBT",
+        "END": END,
+    })
+
+    graph.add_conditional_edges("TOOL_USE", router, {
+        "WEB_SEARCH": "WEB_SEARCH",
+        "ANALYTICAL": "ANALYTICAL",
+        "TOOL_USE": "TOOL_USE",
+        "SUMMARIZE": "SUMMARIZER",
+        "DOUBT": "DOUBT",
+        "END": END,
+    })
+
+    # summarizer always goes to critic now
+    graph.add_edge("SUMMARIZER", "CRITIC")
+
+    # critic decides: revise or end
+    graph.add_conditional_edges("CRITIC", critic_router, {
+        "SUMMARIZER": "SUMMARIZER",
+        "END": END,
+    })
+
+    graph.add_edge("CHAT", END)
+    graph.add_edge("DOUBT", END)
+
+    return graph.compile()"
+
+memory_manager.py "import json
+import uuid
+from datetime import datetime
+
+SESSIONS_FILE = "sessions.jsonl"
+
+# ── in-memory store: { session_id: session_dict } ──────────────────────────
+_sessions: dict = {}
+
+
+def _load_sessions_from_disk():
+    """Load all sessions from sessions.jsonl into memory on startup."""
+    try:
+        with open(SESSIONS_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    s = json.loads(line)
+                    _sessions[s["id"]] = s
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+
+
+def _save_all_to_disk():
+    """Rewrite the entire file — simple approach for small datasets."""
+    with open(SESSIONS_FILE, "w") as f:
+        for s in _sessions.values():
+            f.write(json.dumps(s) + "\n")
+
+
+# Load on import so the server has history from the moment it starts
+_load_sessions_from_disk()
+
+
+# ── public API ──────────────────────────────────────────────────────────────
+
+def create_session() -> str:
+    """Create a new empty session, persist it, return its id."""
+    sid = str(uuid.uuid4())
+    session = {
+        "id": sid,
+        "title": "",
+        "date": datetime.now().strftime("%m/%d/%Y"),
+        "created_at": datetime.now().isoformat(),
+        "messages": [],
+    }
+    _sessions[sid] = session
+    _save_all_to_disk()
+    return sid
+
+
+def append_to_session(session_id: str, query: str, response: str):
+    """Add a Q&A turn to an existing session and persist."""
+    if session_id not in _sessions:
+        create_session()
+
+    session = _sessions[session_id]
+    session["messages"].append({
+        "user_query": query,
+        "assistant_response": response,
+        "timestamp": datetime.now().isoformat(),
+    })
+    if not session["title"] and query:
+        session["title"] = query[:48]
+
+    _save_all_to_disk()
+
+
+def delete_session(session_id: str) -> bool:
+    """Remove a session from memory and disk. Returns True if deleted."""
+    if session_id not in _sessions:
+        return False
+    del _sessions[session_id]
+    _save_all_to_disk()
+    return True
+
+
+def get_all_sessions() -> list:
+    """Return all sessions sorted newest first."""
+    return sorted(_sessions.values(), key=lambda s: s.get("created_at", ""), reverse=True)
+
+
+def get_session_history(session_id: str) -> list:
+    """Return the chat_history list format that agents expect."""
+    session = _sessions.get(session_id, {})
+    return session.get("messages", [])
+
+
+# ── legacy helpers ──────────────────────────────────────────────────────────
+
+def format_history(chat_history: list, max_turns: int = 5) -> str:
+    if not chat_history:
+        return ""
+    recent = chat_history[-max_turns:]
+    lines = []
+    for entry in recent:
+        lines.append(f"User: {entry['user_query']}")
+        lines.append(f"Assistant: {entry['assistant_response']}")
+    return "Conversation so far:\n" + "\n".join(lines)
+
+
+def store_chat_history(query: str, response: str) -> dict:
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "user_query": query,
+        "assistant_response": response,
+    }
+
+
+def store_episode(chat_history: list):
+    """Legacy no-op."""
+    pass
+"
+
+calculator "import ast
+import math
+import operator
+
+_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+_FUNCS = {
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "round": round,
+    "log": math.log,
+    "log10": math.log10,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "min": min,
+    "max": max,
+}
+_NAMES = {
+    "pi": math.pi,
+    "e": math.e,
+}
+
+
+class UnsafeExpression(Exception):
+    pass
+
+
+def _eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise UnsafeExpression(f"disallowed constant: {node.value!r}")
+    if isinstance(node, ast.BinOp):
+        op_type = type(node.op)
+        if op_type not in _BINOPS:
+            raise UnsafeExpression(f"disallowed operator: {op_type.__name__}")
+        return _BINOPS[op_type](_eval_node(node.left), _eval_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op_type = type(node.op)
+        if op_type not in _UNARYOPS:
+            raise UnsafeExpression(f"disallowed operator: {op_type.__name__}")
+        return _UNARYOPS[op_type](_eval_node(node.operand))
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
+            raise UnsafeExpression("disallowed function call")
+        args = [_eval_node(a) for a in node.args]
+        return _FUNCS[node.func.id](*args)
+    if isinstance(node, ast.Name):
+        if node.id in _NAMES:
+            return _NAMES[node.id]
+        raise UnsafeExpression(f"disallowed name: {node.id}")
+    raise UnsafeExpression(f"disallowed expression: {type(node).__name__}")
+
+
+def calculate(expr: str) -> str:
+    """Evaluate a math expression using a whitelisted AST walk (no eval())."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+        result = _eval_node(tree)
+        return str(result)
+    except UnsafeExpression as e:
+        return f"Calculator rejected expression: {e}"
+    except ZeroDivisionError:
+        return "Calculator error: division by zero"
+    except Exception as e:
+        return f"Calculator error: {e}""
+
+code_sandbox.py "import os
+import subprocess
+import sys
+import tempfile
+
+try:
+    import resource
+    _HAS_RESOURCE = os.name == "posix"
+except ImportError:
+    _HAS_RESOURCE = False
+
+_BLOCKED_BUILTINS = ["open", "eval", "exec", "compile", "input", "exit", "quit"]
+_BLOCKED_MODULES = ["os", "subprocess", "socket", "shutil"]
+
+_PRELUDE = f"""
+import builtins as _b
+for _name in {_BLOCKED_BUILTINS!r}:
+    if hasattr(_b, _name):
+        setattr(_b, _name, None)
+import sys as _sys
+for _mod in {_BLOCKED_MODULES!r}:
+    _sys.modules[_mod] = None
+"""
+
+
+def _limit_resources():
+    resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+
+
+def run_sandboxed(code: str, timeout: int = 5) -> str:
+    """
+    Best-effort sandbox for a single local user. Blocks common dangerous
+    builtins/modules and caps CPU+memory on POSIX (no-op on Windows).
+    NOT safe for multi-tenant or internet-facing use — for that, run each
+    call in its own Docker container instead.
+    Code must print() its result; return value is otherwise discarded.
+    """
+    full_code = _PRELUDE + "\n" + code
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(full_code)
+            path = f.name
+
+        kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        if _HAS_RESOURCE:
+            kwargs["preexec_fn"] = _limit_resources
+
+        result = subprocess.run([sys.executable, path], **kwargs)
+
+        if result.returncode != 0:
+            return f"Code ran with errors:\n{result.stderr.strip()[-1000:]}"
+        output = result.stdout.strip()
+        return output[-2000:] if output else "Code ran with no output. Use print() to return a result."
+    except subprocess.TimeoutExpired:
+        return f"Code execution timed out after {timeout}s"
+    except Exception as e:
+        return f"Sandbox error: {e}"
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass"
+
+datetime_tool.py "from datetime import datetime, timedelta
+
+
+def get_datetime(days_offset: int = 0) -> str:
+    """Return the current date/time, optionally offset by N days."""
+    try:
+        target = datetime.now() + timedelta(days=int(days_offset))
+        return target.strftime("%A, %d %B %Y, %H:%M:%S")
+    except Exception as e:
+        return f"Datetime error: {e}""
+
+live_data.py "import requests
+
+
+def get_exchange_rate(base: str = "USD", target: str = "INR", amount: float = 1.0) -> str:
+    """Convert currency using the free, keyless Frankfurter API."""
+    try:
+        resp = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": base.upper(), "to": target.upper()},
+            timeout=5,
+        )
+        data = resp.json()
+        rate = data.get("rates", {}).get(target.upper())
+        if rate is None:
+            return f"Could not find an exchange rate for {base} to {target}"
+        converted = rate * float(amount)
+        return f"{amount} {base.upper()} = {converted:.2f} {target.upper()} (rate: {rate})"
+    except Exception as e:
+        return f"Exchange rate lookup failed: {e}""
+
+llm.py "from langchain_ollama import OllamaLLM
+from settings import BASE_MODEL
+
+def generate(user_query: str, model_used=BASE_MODEL):
+    model = OllamaLLM(model=model_used)
+    return model.invoke(user_query)
+
+def generate_stream(user_query: str, model_used=BASE_MODEL):
+    model = OllamaLLM(model=model_used)
+    for chunk in model.stream(user_query):
+        yield chunk"
+
+registry.py "from tools.calculator import calculate
+from tools.code_sandbox import run_sandboxed
+from tools.live_data import get_exchange_rate
+from tools.datetime_tool import get_datetime
+
+TOOLS = {
+    "calculator": {
+        "fn": calculate,
+        "description": 'Evaluate a math expression. Args: {"expr": "<expression>"}',
+    },
+    "code_exec": {
+        "fn": run_sandboxed,
+        "description": 'Run a short sandboxed Python snippet that must print() its result. Args: {"code": "<python code>"}',
+    },
+    "exchange_rate": {
+        "fn": get_exchange_rate,
+        "description": 'Convert currency. Args: {"base": "USD", "target": "INR", "amount": 100}',
+    },
+    "datetime": {
+        "fn": get_datetime,
+        "description": 'Get the current date/time, optionally offset by days. Args: {"days_offset": 0}',
+    },
+}
+
+
+def tool_descriptions() -> str:
+    return "\n".join(f"- {name}: {spec['description']}" for name, spec in TOOLS.items())
+
+
+def run_tool(name: str, args: dict) -> str:
+    if name not in TOOLS:
+        return f"Unknown tool: {name}"
+    try:
+        return str(TOOLS[name]["fn"](**(args or {})))
+    except TypeError as e:
+        return f"Tool '{name}' called with bad arguments: {e}"
+    except Exception as e:
+        return f"Tool '{name}' failed: {e}""
+
+webSurfing.py "from settings import TAVILY_KEY as tavily_key
+import requests
+from bs4 import BeautifulSoup
+
+def fetch_page(url: str, max_chars: int = 3000) -> str:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # remove noise
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        
+        text = soup.get_text(separator=" ", strip=True)
+        return text[:max_chars]
+    except Exception as e:
+        return f"Could not fetch page: {e}"
+
+def search_web(query: str, max_results: int = 4) -> str:
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if results:
+            formatted = []
+            for r in results[:2]:  # only fetch top 2 pages fully
+                url = r.get('href', '')
+                snippet = r.get('body', '')
+                page_content = fetch_page(url)
+                formatted.append(
+                    f"Title: {r.get('title', '')}\n"
+                    f"URL: {url}\n"
+                    f"Snippet: {snippet}\n"
+                    f"Full content: {page_content}"
+                )
+            # remaining results just use snippets
+            for r in results[2:]:
+                formatted.append(
+                    f"Title: {r.get('title', '')}\n"
+                    f"URL: {r.get('href', '')}\n"
+                    f"Snippet: {r.get('body', '')}"
+                )
+            return "\n\n---\n\n".join(formatted)
+        raise Exception("No results")
+    except Exception as e:
+        print(f"[DDGS failed] {e}")
+
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=tavily_key)
+        results = client.search(query, max_results=max_results)
+        formatted = []
+        for r in results.get("results", []):
+            formatted.append(f"Title: {r.get('title', '')}\nSnippet: {r.get('content', '')}\nURL: {r.get('url', '')}")
+        return "\n\n".join(formatted)
+    except Exception as e:
+        return f"Search failed: {e}""
+
+main.py "from graph.builder import build_graph
+from state import AgentState
+from memory.memory_manager import store_chat_history, store_episode
+import argparse
+
+# Maps actual LangGraph node names to the step ids the frontend ticks off.
+# If you rename/add a node in builder.py, update this dict too.
+NODE_TO_STEP = {
+    "PLANNER":    "planning",
+    "WEB_SEARCH": "researching",
+    "SELF_ASK":   "researching",
+    "ANALYTICAL": "analyzing",
+    "TOOL_USE":   "tools",
+    "SUMMARIZER": "summarizing",
+    "CHAT":       "summarizing",
+    "DOUBT":      "summarizing",
+    "CRITIC":     "critiquing",
+}
+
+
+def run(user_query: str, chat_history: list = None, mode: str = "deep") -> tuple[str, dict]:
+    if chat_history is None:
+        chat_history = []
+    graph = build_graph()
+    initial_state: AgentState = {
+        "query": user_query, "subtasks": [], "mode": mode,
+        "current_task_index": 0, "results": [], "final_response": "",
+        "awaiting_clarification": False, "critic_score": 0,
+        "critic_retries": 0, "needs_revision": False,
+        "chat_history": chat_history,
+    }
+    final_state = graph.invoke(initial_state)
+    print()
+    return final_state.get("final_response", "No response generated."), final_state
+
+
+def run_stream(user_query: str, chat_history: list = None, mode: str = "deep"):
+    """
+    Same pipeline, but yields a progress event the instant each LangGraph
+    node actually finishes — no fake delays.
+
+      {"event": "done",   "step": "<id>"}
+      {"event": "revert", "step": "critiquing", "to": "summarizing"}
+      {"event": "final",  "text": "<answer>"}
+    """
+    if chat_history is None:
+        chat_history = []
+    graph = build_graph()
+    initial_state: AgentState = {
+        "query": user_query, "subtasks": [], "mode": mode,
+        "current_task_index": 0, "results": [], "final_response": "",
+        "awaiting_clarification": False, "critic_score": 0,
+        "critic_retries": 0, "needs_revision": False,
+        "chat_history": chat_history,
+    }
+
+    final_response = "No response generated."
+
+    for chunk in graph.stream(initial_state, stream_mode="updates"):
+        for node_name, node_state in chunk.items():
+            if node_state.get("final_response"):
+                final_response = node_state["final_response"]
+
+            if node_name == "CRITIC":
+                if node_state.get("needs_revision"):
+                    yield {"event": "revert", "step": "critiquing", "to": "summarizing"}
+                    continue
+                yield {"event": "done", "step": "critiquing"}
+                yield {"event": "final", "text": final_response}
+                return
+
+            if node_name in ("CHAT", "DOUBT"):
+                yield {"event": "done", "step": NODE_TO_STEP[node_name]}
+                yield {"event": "final", "text": final_response}
+                return
+
+            step = NODE_TO_STEP.get(node_name)
+            if step:
+                yield {"event": "done", "step": step}
+
+    yield {"event": "final", "text": final_response}  # safety net
+
+
+if __name__ == "__main__":
+    print("Multi-Agent Research Assistant")
+    print("Type 'exit' to quit\n")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["quick", "deep"], default="deep")
+    args = parser.parse_args()
+    chat_history = []
+    while True:
+        query = input("You: ").strip()
+        if not query:
+            continue
+        if query.lower() == "exit":
+            store_episode(chat_history)
+            break
+        response, _ = run(query, chat_history, mode=args.mode)
+        print(f"\nAssistant: {response}\n")
+        chat_history.append(store_chat_history(query, response))"
+
+server.py "import json
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from main import run, run_stream
+from memory.memory_manager import (
+    create_session,
+    append_to_session,
+    get_all_sessions,
+    get_session_history,
+    delete_session,
+    store_episode,   # kept for /clear backward compat
+)
+from settings import BASE_MODEL
+
+app = FastAPI(title="Agentic Research Assistant API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+class QueryRequest(BaseModel):
+    query: str
+    session_id: str = ""
+    mode: str = "deep"
+
+
+# ── Session management ───────────────────────────────────────────────────────
+
+@app.post("/session/new")
+def new_session():
+    """Create a fresh session and return its id to the frontend."""
+    sid = create_session()
+    return {"session_id": sid}
+
+
+@app.delete("/session/{session_id}")
+def remove_session(session_id: str):
+    """Delete a session from memory and disk."""
+    deleted = delete_session(session_id)
+    return {"deleted": deleted, "session_id": session_id}
+
+
+# ── Chat endpoints ───────────────────────────────────────────────────────────
+
+@app.post("/chat")
+def chat(req: QueryRequest):
+    sid = req.session_id or create_session()
+    history = get_session_history(sid)
+    response, _ = run(req.query, history, mode=req.mode)
+    append_to_session(sid, req.query, response)
+    return {"response": response, "session_id": sid}
+
+
+@app.post("/chat/stream")
+def chat_stream(req: QueryRequest):
+    sid = req.session_id or create_session()
+    history = get_session_history(sid)
+
+    def stream():
+        final_text = ""
+        try:
+            for event in run_stream(req.query, history, mode=req.mode):
+                if event.get("event") == "final":
+                    final_text = event.get("text", "")
+                yield json.dumps(event) + "\n"
+        except Exception as e:
+            yield json.dumps({"event": "error", "message": str(e)}) + "\n"
+            return
+        append_to_session(sid, req.query, final_text)
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ── History ──────────────────────────────────────────────────────────────────
+
+@app.get("/history")
+def get_history():
+    """Return all sessions grouped — each session has id, title, date, messages[]."""
+    return {"sessions": get_all_sessions()}
+
+
+@app.post("/clear")
+def clear_history():
+    """Legacy endpoint."""
+    return {"status": "cleared"}
+
+
+# ── Health ───────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": BASE_MODEL}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+"
+
+settings.py "from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+CHAT_MODEL = os.getenv("CHAT_MODEL", "phi3.5:latest")
+BASE_MODEL = os.getenv("BASE_MODEL", "llama3:latest")
+TAVILY_KEY = os.getenv("TAVILY_KEY", "")"
+
+state.py "from typing import TypedDict, List
+
+class AgentState(TypedDict):
+    query: str
+    mode: str
+    subtasks: List[dict]
+    current_task_index: int
+    results: List[dict]
+    final_response: str
+    awaiting_clarification: bool
+    critic_score: int
+    critic_retries: int
+    needs_revision: bool
+    chat_history: List[dict]   "
+
