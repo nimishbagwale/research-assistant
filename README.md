@@ -2,7 +2,7 @@
 
 A multi-agent AI research pipeline that plans, searches, analyzes, and summarizes answers in real-time.
 
-**[Live Demo](https://your-app.vercel.app)** • **[Backend API](https://research-assistant-api-1cvk.onrender.com/docs)**
+**[Live Demo](https://research-assistant-olive.vercel.app/)** • **[Backend API](https://research-assistant-api-1cvk.onrender.com/docs)**
 
 ---
 
