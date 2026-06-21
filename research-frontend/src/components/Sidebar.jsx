@@ -72,7 +72,6 @@ export default function Sidebar({ sessions, activeId, onSelect, onDelete, onNew,
 
       {/* Footer */}
       <div className="sidebar-footer">
-        <span className="footer-url">localhost:8000</span>
         <div className="footer-btns">
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle theme">
             {light ? <Moon /> : <Sun />}
