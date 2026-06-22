@@ -1,45 +1,35 @@
 import json
 import uuid
 from datetime import datetime
+import os
 
-SESSIONS_FILE = "sessions.jsonl"
+MONGODB_URI = os.getenv("MONGODB_URI", "")
 
-# ── in-memory store: { session_id: session_dict } ──────────────────────────
+# ── MongoDB or in-memory fallback ────────────────────────────────────────────
+_use_mongo = bool(MONGODB_URI)
+_collection = None
+
+if _use_mongo:
+    try:
+        from pymongo import MongoClient
+        _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        _db = _client["research_assistant"]
+        _collection = _db["sessions"]
+        print("[Memory] Using MongoDB Atlas")
+    except Exception as e:
+        print(f"[Memory] MongoDB failed: {e} — falling back to in-memory")
+        _use_mongo = False
+
+# In-memory fallback (local dev)
 _sessions: dict = {}
 
-
-def _load_sessions_from_disk():
-    """Load all sessions from sessions.jsonl into memory on startup."""
-    try:
-        with open(SESSIONS_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    s = json.loads(line)
-                    _sessions[s["id"]] = s
-                except Exception:
-                    pass
-    except FileNotFoundError:
-        pass
+if not _use_mongo:
+    print("[Memory] Using in-memory store (sessions will reset on restart)")
 
 
-def _save_all_to_disk():
-    """Rewrite the entire file — simple approach for small datasets."""
-    with open(SESSIONS_FILE, "w") as f:
-        for s in _sessions.values():
-            f.write(json.dumps(s) + "\n")
-
-
-# Load on import so the server has history from the moment it starts
-_load_sessions_from_disk()
-
-
-# ── public API ──────────────────────────────────────────────────────────────
+# ── public API ───────────────────────────────────────────────────────────────
 
 def create_session(user_id: str = "anonymous") -> str:
-    """Create a new empty session, persist it, return its id."""
     sid = str(uuid.uuid4())
     session = {
         "id": sid,
@@ -49,44 +39,58 @@ def create_session(user_id: str = "anonymous") -> str:
         "created_at": datetime.now().isoformat(),
         "messages": [],
     }
-    _sessions[sid] = session
-    _save_all_to_disk()
+    if _use_mongo:
+        _collection.insert_one({**session, "_id": sid})
+    else:
+        _sessions[sid] = session
     return sid
 
 
 def append_to_session(session_id: str, query: str, response: str):
-    """Add a Q&A turn to an existing session and persist."""
-    if session_id not in _sessions:
-        create_session()
-
-    session = _sessions[session_id]
-    session["messages"].append({
+    msg = {
         "user_query": query,
         "assistant_response": response,
         "timestamp": datetime.now().isoformat(),
-    })
-    if not session["title"] and query:
-        session["title"] = query[:48]
-
-    _save_all_to_disk()
+    }
+    if _use_mongo:
+        update = {"$push": {"messages": msg}}
+        # Set title from first message
+        _collection.update_one(
+            {"_id": session_id, "title": ""},
+            {"$set": {"title": query[:48]}}
+        )
+        _collection.update_one({"_id": session_id}, update)
+    else:
+        if session_id not in _sessions:
+            return
+        session = _sessions[session_id]
+        session["messages"].append(msg)
+        if not session["title"] and query:
+            session["title"] = query[:48]
 
 
 def delete_session(session_id: str) -> bool:
-    """Remove a session from memory and disk. Returns True if deleted."""
-    if session_id not in _sessions:
-        return False
-    del _sessions[session_id]
-    _save_all_to_disk()
-    return True
+    if _use_mongo:
+        result = _collection.delete_one({"_id": session_id})
+        return result.deleted_count > 0
+    else:
+        if session_id not in _sessions:
+            return False
+        del _sessions[session_id]
+        return True
 
 
 def get_all_sessions() -> list:
-    """Return all sessions sorted newest first."""
+    if _use_mongo:
+        docs = list(_collection.find({}, {"_id": 0}).sort("created_at", -1))
+        return docs
     return sorted(_sessions.values(), key=lambda s: s.get("created_at", ""), reverse=True)
 
 
 def get_sessions_by_user(user_id: str) -> list:
-    """Return only sessions belonging to this user, newest first."""
+    if _use_mongo:
+        docs = list(_collection.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1))
+        return docs
     return sorted(
         [s for s in _sessions.values() if s.get("user_id", "anonymous") == user_id],
         key=lambda s: s.get("created_at", ""),
@@ -95,12 +99,14 @@ def get_sessions_by_user(user_id: str) -> list:
 
 
 def get_session_history(session_id: str) -> list:
-    """Return the chat_history list format that agents expect."""
+    if _use_mongo:
+        doc = _collection.find_one({"_id": session_id}, {"messages": 1})
+        return doc["messages"] if doc else []
     session = _sessions.get(session_id, {})
     return session.get("messages", [])
 
 
-# ── legacy helpers ──────────────────────────────────────────────────────────
+# ── legacy helpers ───────────────────────────────────────────────────────────
 
 def _extract_summary(response: str, max_chars: int = 300) -> str:
     import re
@@ -111,10 +117,6 @@ def _extract_summary(response: str, max_chars: int = 300) -> str:
 
 
 def format_history(chat_history: list, max_turns: int = 3) -> str:
-    """
-    Only last 3 turns, assistant response trimmed to Summary section (~300 chars).
-    Prevents old report blobs from polluting the LLM context.
-    """
     if not chat_history:
         return ""
     recent = chat_history[-max_turns:]
@@ -135,5 +137,4 @@ def store_chat_history(query: str, response: str) -> dict:
 
 
 def store_episode(chat_history: list):
-    """Legacy no-op."""
     pass
