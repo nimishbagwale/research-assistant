@@ -11,6 +11,14 @@ def build_context(results: list) -> str:
         context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
     return context
 
+def is_code_query(query: str) -> bool:
+    """Detect if the user wants code output."""
+    keywords = ['write', 'code', 'program', 'function', 'script', 'implement',
+                'algorithm', 'snippet', 'example code', 'show me how to',
+                'python', 'javascript', 'java', 'c++', 'sql', 'bash']
+    q = query.lower()
+    return any(k in q for k in keywords)
+
 def build_summarize_prompt(state: AgentState) -> str:
     subtasks = state['subtasks']
     idx = len(subtasks) - 1
@@ -18,6 +26,43 @@ def build_summarize_prompt(state: AgentState) -> str:
     context = build_context(state['results'])
     original_query = state.get('query', task.get('goal', ''))
     summarize_goal = task.get('goal', '')
+
+    # Code query — completely different format, no findings grid
+    if is_code_query(original_query):
+        return f"""{context}
+
+The user asked for code. Write a clean, direct response using EXACTLY these sections:
+
+## Summary
+One sentence explaining what the code does.
+
+## Key Findings
+Write a single item — the complete code solution with explanation:
+1. Here is the complete solution: [brief explanation]
+
+Then put the full code block in the Summary section itself, after the explanation sentence, like this:
+
+## Summary
+[explanation sentence]
+
+```python
+# full code here
+```
+
+## Sources
+- https://docs.python.org
+
+## Confidence
+High
+
+Rules:
+- Put the FULL code block inside ## Summary, after the explanation
+- ## Key Findings should have at most 2-3 lines explaining what the code does — NO code fragments
+- Never split code across multiple findings items
+- Always use proper markdown code fences with language tag
+
+Original user query: {original_query}"""
+
     return f"""{context}
 
 Based on the research findings above, write a structured answer using EXACTLY these markdown sections:
@@ -108,7 +153,6 @@ def summarize(state: AgentState):
         idx = len(subtasks) - 1
 
     task = subtasks[idx]
-
     prompt = build_summarize_prompt(state)
 
     print("Summarizing |", end=" ", flush=True)
@@ -130,7 +174,6 @@ def doubt(state: AgentState):
     subtasks = state['subtasks']
     idx = state['current_task_index']
     task = subtasks[idx]
-
     goal = task.get('goal', '')
 
     prompt = f"""{history}

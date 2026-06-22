@@ -1,7 +1,7 @@
-import { ExternalLink, AlertTriangle } from 'lucide-react';
+import { ExternalLink, Copy, Check } from 'lucide-react';
+import { useState } from 'react';
 import { parseResponse, getDomain } from '../api/parser.js';
 
-// Renders star/emoji ratings and price cells
 function CellValue({ value }) {
   if (/^[★☆⭐️\s]+$/.test(value) && /[★☆⭐]/.test(value)) {
     return (
@@ -34,7 +34,7 @@ function SourcesAndConfidence({ sources, confidence }) {
           <div className="sources-row">
             {sources.map((url, i) => (
               <a key={i} href={url} target="_blank" rel="noreferrer" className="source-chip">
-                {getDomain(url)} <ExternalLink />
+                {getDomain(url)} <ExternalLink size={10} />
               </a>
             ))}
           </div>
@@ -50,9 +50,51 @@ function SourcesAndConfidence({ sources, confidence }) {
   );
 }
 
-// ── Layout variants ──────────────────────────────────────────────
+// Renders summary text — if it contains a code block, render it properly
+function SummaryWithCode({ text }) {
+  const parts = [];
+  const regex = /```(\w*)\n([\s\S]*?)```/g;
+  let last = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > last) parts.push({ type: 'text', content: text.slice(last, match.index) });
+    parts.push({ type: 'code', lang: match[1] || 'text', content: match[2].trimEnd() });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ type: 'text', content: text.slice(last) });
 
-// Default research layout: Summary → Findings → Sources
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.type === 'text'
+          ? <p key={i} className="report-summary">{p.content.trim()}</p>
+          : <CodeBlock key={i} lang={p.lang} code={p.content} />
+      )}
+    </>
+  );
+}
+
+function CodeBlock({ lang, code }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="code-block-wrap">
+      <div className="code-block-header">
+        <span className="code-lang">{lang}</span>
+        <button className="copy-btn" onClick={copy}>
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre className="code-block"><code>{code}</code></pre>
+    </div>
+  );
+}
+
 function ResearchLayout({ summary, findings, sources, confidence }) {
   return (
     <div className="report-card">
@@ -80,7 +122,6 @@ function ResearchLayout({ summary, findings, sources, confidence }) {
   );
 }
 
-// Comparison layout: Summary → Table → Findings (compact) → Sources
 function ComparisonLayout({ summary, table, findings, sources, confidence }) {
   return (
     <div className="report-card report-card-comparison">
@@ -131,7 +172,6 @@ function ComparisonLayout({ summary, table, findings, sources, confidence }) {
   );
 }
 
-// List layout: Summary → numbered list cards (bigger, spaced) → Sources
 function ListLayout({ summary, findings, sources, confidence }) {
   return (
     <div className="report-card report-card-list">
@@ -159,7 +199,34 @@ function ListLayout({ summary, findings, sources, confidence }) {
   );
 }
 
-// Chat layout: just the text, no sections
+// Code layout — summary with inline code block + explanation findings
+function CodeLayout({ summary, findings, sources, confidence }) {
+  return (
+    <div className="report-card report-card-code">
+      {summary && (
+        <div className="report-section">
+          <div className="report-section-label">Solution</div>
+          <SummaryWithCode text={summary} />
+        </div>
+      )}
+      {findings.length > 0 && (
+        <div className="report-section">
+          <div className="report-section-label">How it works</div>
+          <div className="findings-list">
+            {findings.map((f, i) => (
+              <div key={i} className="finding-item">
+                <span className="finding-index">{i + 1}</span>
+                <span className="finding-text">{f}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <SourcesAndConfidence sources={sources} confidence={confidence} />
+    </div>
+  );
+}
+
 function ChatLayout({ summary }) {
   return (
     <div className="report-card report-card-chat">
@@ -168,7 +235,6 @@ function ChatLayout({ summary }) {
   );
 }
 
-// ── Main export ──────────────────────────────────────────────────
 export default function ReportCard({ text, isStreaming }) {
   if (isStreaming) {
     return (
@@ -182,6 +248,7 @@ export default function ReportCard({ text, isStreaming }) {
   const { summary, findings, sources, confidence, table, queryType } = parseResponse(text);
 
   if (queryType === 'chat') return <ChatLayout summary={summary || text} />;
+  if (queryType === 'code') return <CodeLayout summary={summary} findings={findings} sources={sources} confidence={confidence} />;
   if (queryType === 'comparison') return <ComparisonLayout summary={summary} table={table} findings={findings} sources={sources} confidence={confidence} />;
   if (queryType === 'list') return <ListLayout summary={summary} findings={findings} sources={sources} confidence={confidence} />;
   return <ResearchLayout summary={summary} findings={findings} sources={sources} confidence={confidence} />;
