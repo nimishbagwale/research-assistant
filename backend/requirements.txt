@@ -8,6 +8,5 @@ duckduckgo-search
 tavily-python
 requests
 beautifulsoup4
-pymongo
 python-dotenv
 pydantic
