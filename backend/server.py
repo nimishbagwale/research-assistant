@@ -90,7 +90,7 @@ def clear_history():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": BASE_MODEL}
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
