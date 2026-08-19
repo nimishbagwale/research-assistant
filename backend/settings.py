@@ -10,7 +10,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")  # "groq" | "ollama"
 
 # Groq
 GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL    = os.getenv("GROQ_MODEL", "llama3-70b-8192")   # free, fast
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
 # Ollama (local dev)
 CHAT_MODEL = os.getenv("CHAT_MODEL", "phi3.5:latest")
