@@ -4,7 +4,7 @@ groq
 langchain-ollama
 langchain
 langgraph
-duckduckgo-search
+ddgs                    # FIX: code does `from ddgs import DDGS`; old `duckduckgo-search` package doesn't provide that module
 tavily-python
 requests
 beautifulsoup4

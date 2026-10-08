@@ -49,7 +49,12 @@ def remove_session(session_id: str):
 def chat(req: QueryRequest):
     sid = req.session_id or create_session(user_id=req.user_id)
     history = get_session_history(sid)
-    response, _ = run(req.query, history, mode=req.mode)
+    # FIX: catch pipeline errors so the client gets a clean message instead of a 500
+    try:
+        response, _ = run(req.query, history, mode=req.mode)
+    except Exception as e:
+        print(f"[/chat error] {e}")
+        return {"response": "Something went wrong while researching. Please try again.", "session_id": sid}
     append_to_session(sid, req.query, response)
     return {"response": response, "session_id": sid}
 

@@ -3,6 +3,7 @@ from tools.llm import generate
 from tools.webSurfing import search_web
 from settings import BASE_MODEL
 import json
+import re  # FIX: for safe code-fence stripping
 
 
 def is_bad_result(raw: str) -> bool:
@@ -34,7 +35,7 @@ Return ONLY a JSON array of 3 strings. No explanation, no markdown.
 Example: ["query one", "query two", "query three"]"""
 
     raw = generate(prompt, BASE_MODEL)
-    raw = raw.strip().strip("```json").strip("```").strip()
+    raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()  # FIX: .strip("```json") strips characters, not the string
     try:
         queries = json.loads(raw)
         return queries if isinstance(queries, list) else [goal]
@@ -85,9 +86,13 @@ def research(state: AgentState):
     if all_results:
         raw_results = "\n\n---\n\n".join(all_results)
     else:
-        # All searches exhausted — use whatever the last search returned
-        # so the LLM at least has some signal rather than hallucinating
-        raw_results = search_web(goal, 4)
+        # FIX: removed the extra third search_web() call (it just returned the failure string
+        # and fed "Search failed..." text to the LLM). Tell the LLM plainly instead.
+        raw_results = (
+            "NO SEARCH RESULTS AVAILABLE. Live search is unavailable right now. "
+            "Do not call any tools. Answer briefly from general knowledge, "
+            "clearly say the information may be outdated, and list no sources."
+        )
 
     prompt = f"""{context}
 

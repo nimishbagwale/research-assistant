@@ -40,7 +40,11 @@ def _format_ddgs(results, max_results):
 def _search_ddgs(query: str, max_results: int) -> str | None:
     """Try DuckDuckGo. Returns result string or None on failure."""
     try:
-        from ddgs import DDGS
+        # FIX: try new package name first, fall back to the old one
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         if results:
@@ -108,7 +112,9 @@ def _search_google_scrape(query: str, max_results: int) -> str | None:
 
 def search_web(query: str, max_results: int = 4) -> str:
     """
-    Search with a 3-tier fallback: DDGS → Tavily → Google scrape.
+    Search with a fallback chain: DDGS -> Tavily.
+    # FIX: Google scrape removed from the chain. Google blocks datacenter IPs (Render),
+    # so it always returned "No results parsed" and only added latency.
     Always returns a non-empty string (or a clear failure message).
     """
     result = _search_ddgs(query, max_results)
@@ -117,11 +123,6 @@ def search_web(query: str, max_results: int = 4) -> str:
 
     print("[Fallback] Trying Tavily...")
     result = _search_tavily(query, max_results)
-    if result:
-        return result
-
-    print("[Fallback] Trying Google scrape...")
-    result = _search_google_scrape(query, max_results)
     if result:
         return result
 
