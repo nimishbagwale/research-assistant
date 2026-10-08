@@ -421,81 +421,89 @@ function ReportContent({ text, isStreaming }) {
       </div>
     );
   }
-  if (isStreaming) {
-    return <div className="message-text raw-stream">{text}</div>;
-  }
+  if (isStreaming) return <div className="message-text raw-stream">{text}</div>;
 
   const parsed = parseReport(text);
-  if (parsed.queryType === 'chat') {
-    return <div className="message-text">{parsed.summary || text}</div>;
-  }
+  if (parsed.queryType === 'chat') return <div className="message-text">{parsed.summary || text}</div>;
+  if (parsed.queryType === 'code') return <CodeResult parsed={parsed} />;
+  if (parsed.queryType === 'howto') return <HowToResult parsed={parsed} />;
+  if (parsed.queryType === 'comparison') return <ComparisonResult parsed={parsed} />;
+  if (parsed.queryType === 'list') return <ListResult parsed={parsed} />;
+  if (parsed.queryType === 'definition') return <DefinitionResult parsed={parsed} />;
+  return <ResearchResult parsed={parsed} />;
+}
 
+function ResultFrame({ parsed, eyebrow, icon, children }) {
   return (
-    <div className="report-card">
-      {parsed.summary && (
-        <div className="report-section">
-          <div className="report-section-label">Summary</div>
-          <p className="report-summary">{parsed.summary}</p>
-        </div>
-      )}
-      {parsed.findings.length > 0 && (
-        <div className="report-section">
-          <div className="report-section-label">Key Findings</div>
-          <div className="findings-list">
-            {parsed.findings.map((f, i) => (
-              <div className="finding-item" key={i}>
-                <span className="finding-index">{i + 1}</span>
-                <span className="finding-text">{f}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {parsed.table.length > 0 && (
-        <div className="report-section">
-          <div className="report-section-label">Comparison</div>
-          <div className="report-table-wrap">
-            <table className="report-table">
-              <thead>
-                <tr>{Object.keys(parsed.table[0]).map(h => <th key={h}>{h}</th>)}</tr>
-              </thead>
-              <tbody>
-                {parsed.table.map((row, i) => (
-                  <tr key={i}>
-                    {Object.entries(row).map(([, v], j) => (
-                      <td key={j} className={j === 0 ? 'td-primary' : ''}>{v}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-      {(parsed.sources.length > 0 || parsed.confidence) && (
-        <div className="confidence-row">
-          <div className="sources-block">
-            <div className="report-section-label">Sources</div>
-            {parsed.sources.length > 0 ? (
-              <div className="sources-row">
-                {parsed.sources.map((url, i) => (
-                  <a key={i} href={url} target="_blank" rel="noreferrer" className="source-chip">
-                    {getDomain(url)} <ExternalLink size={10} />
-                  </a>
-                ))}
-              </div>
-            ) : <span className="no-sources">No sources extracted.</span>}
-          </div>
-          {parsed.confidence && (
-            <div className="confidence-block">
-              <div className="report-section-label" style={{ textAlign: 'right' }}>Confidence</div>
-              <span className={`confidence-badge ${parsed.confidence.toLowerCase()}`}>{parsed.confidence.toUpperCase()}</span>
-            </div>
-          )}
-        </div>
-      )}
+    <div className="result-card">
+      <div className="result-header">
+        <div className="result-icon">{icon}</div>
+        <div><span className="result-eyebrow">{eyebrow}</span><span className="result-confidence">{parsed.confidence} confidence</span></div>
+      </div>
+      {children}
+      <ResultSources sources={parsed.sources} />
     </div>
   );
+}
+
+function ResearchResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Research brief" icon={<Sparkles size={16} />}>
+      <div className="result-lead">{parsed.summary}</div>
+      {parsed.findings.length > 0 && <div className="insight-grid">{parsed.findings.slice(0, 6).map((item, index) => <div className="insight-tile" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>)}</div>}
+    </ResultFrame>
+  );
+}
+
+function ListResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Curated list" icon={<Check size={16} />}>
+      <div className="result-lead">{parsed.summary}</div>
+      <div className="ranked-list">{parsed.findings.map((item, index) => <div className="ranked-item" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>)}</div>
+    </ResultFrame>
+  );
+}
+
+function ComparisonResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Side-by-side comparison" icon={<ChevronRight size={16} />}>
+      <div className="result-lead">{parsed.summary}</div>
+      <div className="comparison-cards">{parsed.table.map((row, index) => <div className="comparison-card" key={index}>{Object.entries(row).map(([key, value], valueIndex) => <div className={valueIndex === 0 ? 'comparison-title' : 'comparison-detail'} key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>)}</div>
+    </ResultFrame>
+  );
+}
+
+function HowToResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Step-by-step guide" icon={<ArrowUp size={16} />}>
+      <div className="result-lead">{parsed.summary}</div>
+      <div className="guide-list">{parsed.findings.map((item, index) => <div className="guide-step" key={index}><span>{index + 1}</span><div><strong>Step {index + 1}</strong><p>{item}</p></div></div>)}</div>
+    </ResultFrame>
+  );
+}
+
+function DefinitionResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Quick explanation" icon={<Globe2 size={16} />}>
+      <div className="definition-block"><span>In simple terms</span><p>{parsed.summary}</p></div>
+      {parsed.findings.length > 0 && <div className="related-points"><span>Worth knowing</span>{parsed.findings.slice(0, 4).map((item, index) => <p key={index}>{item}</p>)}</div>}
+    </ResultFrame>
+  );
+}
+
+function CodeResult({ parsed }) {
+  return (
+    <ResultFrame parsed={parsed} eyebrow="Code answer" icon={<Cpu size={16} />}>
+      <div className="code-intro">{parsed.summary}</div>
+      {parsed.codeBlocks.map((block, index) => <div className="code-block" key={index}><div className="code-toolbar"><span>{block.language || 'code'}</span><span className="code-dots"><i /><i /><i /></span></div><pre><code>{block.code}</code></pre></div>)}
+      {parsed.findings.length > 0 && <div className="code-notes"><span>Notes</span>{parsed.findings.slice(0, 4).map((item, index) => <p key={index}>{item}</p>)}</div>}
+    </ResultFrame>
+  );
+}
+
+function ResultSources({ sources }) {
+  if (!sources.length) return null;
+  return <div className="result-sources"><span>Sources</span><div>{sources.slice(0, 5).map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer">{getDomain(url)} <ExternalLink size={10} /></a>)}</div></div>;
 }
 
 function stripInlineCitations(text) {
@@ -516,15 +524,15 @@ function isSectionHeader(line) {
 }
 
 function parseReport(raw) {
-  if (!raw) return { summary: '', findings: [], sources: [], confidence: 'Medium', table: [], queryType: 'research' };
+  if (!raw) return { summary: '', findings: [], sources: [], confidence: 'Medium', table: [], codeBlocks: [], queryType: 'research' };
+
   let summary = '';
   let findings = [];
   let sources = [];
   let confidence = 'Medium';
   let table = [];
+  const codeBlocks = [...raw.matchAll(/```([\w+#.-]*)\n?([\s\S]*?)```/g)].map(match => ({ language: match[1], code: match[2].trim() }));
   let queryType = 'research';
-
-  if (!raw.includes('##') && raw.split('\n').length < 6) queryType = 'chat';
 
   const sections = raw.split(/^##\s+/m);
   for (const section of sections) {
@@ -532,50 +540,69 @@ function parseReport(raw) {
     const heading = lines[0].trim().toLowerCase();
     const body = lines.slice(1).join('\n').trim();
 
-    if (heading.includes('summary')) {
-      summary = body.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1').replace(/\[(.*?)\]\(.*?\)/g, '$1').replace(/\s*\[https?:\/\/[^\]]+\]/g, '').trim();
-    } else if (heading.includes('key finding')) {
-      const cleanBody = body.replace(/```[\s\S]*?```/g, '').trim();
-      findings = cleanBody.split('\n').map(l => l.replace(/^\s*(?:\d+[.)* ]|[-*•])\s*/, '').trim()).map(stripInlineCitations).filter(l => l.length > 4 && !isSectionHeader(l) && !l.startsWith('(') && !l.startsWith('`'));
+    if (heading.includes('summary') || heading.includes('answer') || heading.includes('explanation')) {
+      summary = cleanText(body.replace(/```[\s\S]*?```/g, ''));
+    } else if (heading.includes('key finding') || heading.includes('step') || heading.includes('point') || heading.includes('note')) {
+      findings = body.replace(/```[\s\S]*?```/g, '').split('\n')
+        .map(line => line.replace(/^\s*(?:\d+[.)* ]|[-*•])\s*/, '').trim())
+        .map(stripInlineCitations)
+        .filter(line => line.length > 4 && !isSectionHeader(line) && !line.startsWith('('));
     } else if (heading.includes('source')) {
-      sources = body.split('\n').map(l => l.replace(/^\s*[-*•\d.]\s*/, '').trim()).filter(l => /^https?:\/\//.test(l)).filter(l => !l.includes('source.com') && !l.includes('example.com') && !l.includes('bing.com/aclick'));
+      sources = body.split('\n').map(line => line.replace(/^\s*[-*•\d.]\s*/, '').trim())
+        .filter(line => /^https?:\/\//.test(line)).filter(isUsefulSource);
     } else if (heading.includes('confidence')) {
-      const c = body.trim().toLowerCase();
-      confidence = c.includes('high') ? 'High' : c.includes('low') ? 'Low' : 'Medium';
+      const confidenceText = body.toLowerCase();
+      confidence = confidenceText.includes('high') ? 'High' : confidenceText.includes('low') ? 'Low' : 'Medium';
     }
   }
 
-  if (sources.length === 0) {
-    const inlineMatches = [...raw.matchAll(/\[https?:\/\/([^\]\s]+)\]/g)];
-    const inlineUrls = inlineMatches.map(m => 'https://' + m[1]);
+  if (!sources.length) {
+    const inlineUrls = [...raw.matchAll(/\[https?:\/\/([^\]\s]+)\]/g)].map(match => `https://${match[1]}`);
     const plainUrls = raw.match(/(?<!\[)https?:\/\/[^\s),\]"'<>]+/g) || [];
-    sources = [...new Set([...inlineUrls, ...plainUrls])].filter(u => !u.includes('source.com') && !u.includes('example.com') && !u.includes('bing.com/aclick')).slice(0, 8);
+    sources = [...new Set([...inlineUrls, ...plainUrls])].filter(isUsefulSource).slice(0, 8);
   }
 
-  const tableLines = raw.split('\n').filter(l => l.trim().startsWith('|'));
+  const tableLines = raw.split('\n').filter(line => line.trim().startsWith('|'));
   if (tableLines.length >= 3) {
-    const parseRow = r => r.split('|').map(c => c.trim()).filter((_, i, a) => i > 0 && i < a.length - 1);
-    const headerCols = parseRow(tableLines[0]);
-    for (let i = 2; i < tableLines.length; i++) {
-      const cols = parseRow(tableLines[i]);
-      if (cols.length === headerCols.length) {
+    const parseRow = row => row.split('|').map(cell => cell.trim()).filter((_, index, cells) => index > 0 && index < cells.length - 1);
+    const headers = parseRow(tableLines[0]);
+    for (let index = 2; index < tableLines.length; index += 1) {
+      const cells = parseRow(tableLines[index]);
+      if (cells.length === headers.length) {
         const row = {};
-        headerCols.forEach((h, idx) => { row[h] = cols[idx]; });
+        headers.forEach((header, cellIndex) => { row[header] = cells[cellIndex]; });
         table.push(row);
       }
     }
-    if (table.length > 0) queryType = 'comparison';
   }
 
   if (!summary) {
-    const prosLines = raw.replace(/```[\s\S]*?```/g, '').split('\n').filter(l => !l.startsWith('#') && !l.startsWith('|') && !l.startsWith('-') && !l.startsWith('*') && l.trim());
-    summary = stripInlineCitations(prosLines.slice(0, 3).join(' '));
+    const readableLines = raw.replace(/```[\s\S]*?```/g, '').split('\n')
+      .filter(line => line.trim() && !line.trim().startsWith('#') && !line.trim().startsWith('|') && !/^\s*[-*•\d.]/.test(line));
+    summary = cleanText(readableLines.slice(0, 3).join(' '));
   }
 
-  if (table.length > 0) queryType = 'comparison';
-  else if (findings.length >= 5) queryType = 'list';
+  const lowerRaw = raw.toLowerCase();
+  const hasSteps = findings.length >= 2 && (findings.some(item => /^step\s*\d+/i.test(item)) || /how to|steps to|follow these steps|guide/i.test(lowerRaw));
+  const isDefinition = /^(what is|who is|what are|define|explain)\b/i.test(lowerRaw) || /\bmeans\b|\brefers to\b/.test(lowerRaw);
+  const isShortChat = !codeBlocks.length && !table.length && !raw.includes('##') && raw.split('\n').length < 6 && findings.length === 0;
 
-  return { summary, findings, sources, confidence, table, queryType };
+  if (codeBlocks.length || /```|program|code|syntax|function|class\s+\w+/i.test(raw)) queryType = 'code';
+  else if (table.length) queryType = 'comparison';
+  else if (hasSteps) queryType = 'howto';
+  else if (findings.length >= 5) queryType = 'list';
+  else if (isDefinition) queryType = 'definition';
+  else if (isShortChat) queryType = 'chat';
+
+  return { summary, findings, sources, confidence, table, codeBlocks, queryType };
+}
+
+function cleanText(text) {
+  return stripInlineCitations(text).replace(/^\s*(?:summary|answer|explanation)\s*:?\s*/i, '').trim();
+}
+
+function isUsefulSource(url) {
+  return !url.includes('source.com') && !url.includes('example.com') && !url.includes('bing.com/aclick');
 }
 
 function getDomain(url) {
