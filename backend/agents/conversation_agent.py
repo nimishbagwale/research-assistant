@@ -99,6 +99,7 @@ Rules:
 - Use EXACTLY these ## headings, no others, no sub-headings.
 - Be specific: names, numbers, dates, prices.
 - Never call tools. Use only the research above.
+- Cite ONLY with full URLs in square brackets like [https://site.com/page]. Never use numbered citations like [1] or 【1】.  # FIX: stops 【1】 leaking into the UI
 
 Summarize goal: {summarize_goal}
 Original user query: {original_query}"""
