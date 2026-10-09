@@ -272,7 +272,7 @@ export default function App() {
           <section className="conversation-area">
             <div className="welcome-block">
               <div className="eyebrow"><span className="eyebrow-line" /> Agentic research workspace</div>
-              <h1>{messages.length ? currentSession?.title ?? 'Your research' : <>Good evening, <em>Nimish.</em></>}</h1>
+              <h1>{messages.length ? currentSession?.title ?? 'Your research' : <>So what do you wanna talk about ??</>}</h1>
               <p>{messages.length ? 'Ask a follow-up question to keep building your research.' : 'Ask me anything — from the latest news to in-depth research, comparisons, analysis, or just general questions.'}</p>
             </div>
             <div className="messages-scroll">
