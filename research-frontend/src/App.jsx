@@ -450,7 +450,7 @@ function ResearchResult({ parsed }) {
   return (
     <ResultFrame parsed={parsed} eyebrow="Research brief" icon={<Sparkles size={16} />}>
       <div className="result-lead">{parsed.summary}</div>
-      {parsed.findings.length > 0 && <div className="insight-grid">{parsed.findings.slice(0, 6).map((item, index) => <div className="insight-tile" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>)}</div>}
+      {parsed.findings.length > 0 && <div className="insight-grid">{parsed.findings.map((item, index) => <div className="insight-tile" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>)}</div>}
     </ResultFrame>
   );
 }
@@ -469,6 +469,8 @@ function ComparisonResult({ parsed }) {
     <ResultFrame parsed={parsed} eyebrow="Side-by-side comparison" icon={<ChevronRight size={16} />}>
       <div className="result-lead">{parsed.summary}</div>
       <div className="comparison-cards">{parsed.table.map((row, index) => <div className="comparison-card" key={index}>{Object.entries(row).map(([key, value], valueIndex) => <div className={valueIndex === 0 ? 'comparison-title' : 'comparison-detail'} key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>)}</div>
+      {/* FIX: takeaways were parsed but never shown for comparisons */}
+      {parsed.findings.length > 0 && <div className="related-points"><span>Takeaways</span>{parsed.findings.slice(0, 4).map((item, index) => <p key={index}>{item}</p>)}</div>}
     </ResultFrame>
   );
 }
@@ -534,17 +536,21 @@ function parseReport(raw) {
   const codeBlocks = [...raw.matchAll(/```([\w+#.-]*)\n?([\s\S]*?)```/g)].map(match => ({ language: match[1], code: match[2].trim() }));
   let queryType = 'research';
 
-  const sections = raw.split(/^##\s+/m);
+  let declaredFormat = '';  // FIX: format sent by backend in "## Format"
+  // FIX: drop any text before the first "## " heading so it isn't parsed as a fake section
+  const sections = raw.split(/^##\s+/m).slice(raw.trimStart().startsWith('##') ? 0 : 1);
   for (const section of sections) {
     const lines = section.trim().split('\n');
     const heading = lines[0].trim().toLowerCase();
     const body = lines.slice(1).join('\n').trim();
 
-    if (heading.includes('summary') || heading.includes('answer') || heading.includes('explanation')) {
+    if (heading === 'format') {
+      declaredFormat = body.toLowerCase().trim();   // FIX: read backend format
+    } else if (heading.includes('summary') || heading.includes('answer') || heading.includes('explanation')) {
       summary = cleanText(body.replace(/```[\s\S]*?```/g, ''));
     } else if (heading.includes('key finding') || heading.includes('step') || heading.includes('point') || heading.includes('note')) {
       findings = body.replace(/```[\s\S]*?```/g, '').split('\n')
-        .map(line => line.replace(/^\s*(?:\d+[.)* ]|[-*•])\s*/, '').trim())
+        .map(line => line.replace(/^\s*(?:\d+[.)]\s*|[-*•]\s*)/, '').trim())  // FIX: "*"/"-" bullets only when followed by space; keeps "2026 ..." intact
         .map(stripInlineCitations)
         .filter(line => line.length > 4 && !isSectionHeader(line) && !line.startsWith('('));
     } else if (heading.includes('source')) {
@@ -570,7 +576,7 @@ function parseReport(raw) {
       const cells = parseRow(tableLines[index]);
       if (cells.length === headers.length) {
         const row = {};
-        headers.forEach((header, cellIndex) => { row[header] = cells[cellIndex]; });
+        headers.forEach((header, cellIndex) => { row[header] = stripInlineCitations(cells[cellIndex]); }); // FIX: no raw [https://..] links inside table cells
         table.push(row);
       }
     }
@@ -582,17 +588,26 @@ function parseReport(raw) {
     summary = cleanText(readableLines.slice(0, 3).join(' '));
   }
 
-  const lowerRaw = raw.toLowerCase();
-  const hasSteps = findings.length >= 2 && (findings.some(item => /^step\s*\d+/i.test(item)) || /how to|steps to|follow these steps|guide/i.test(lowerRaw));
-  const isDefinition = /^(what is|who is|what are|define|explain)\b/i.test(lowerRaw) || /\bmeans\b|\brefers to\b/.test(lowerRaw);
-  const isShortChat = !codeBlocks.length && !table.length && !raw.includes('##') && raw.split('\n').length < 6 && findings.length === 0;
-
-  if (codeBlocks.length || /```|program|code|syntax|function|class\s+\w+/i.test(raw)) queryType = 'code';
-  else if (table.length) queryType = 'comparison';
-  else if (hasSteps) queryType = 'howto';
-  else if (findings.length >= 5) queryType = 'list';
-  else if (isDefinition) queryType = 'definition';
-  else if (isShortChat) queryType = 'chat';
+  // FIX: trust the backend's format first. The old heuristics scanned the WHOLE answer text:
+  //  - /guide/ matched "AI-guided" -> any 5+ item answer became "Step-by-step guide"
+  //  - /program|code|function/ matched ordinary prose -> "Code answer"
+  //  - /means|refers to/ matched most answers -> "Quick explanation"
+  const known = ['code', 'comparison', 'howto', 'list', 'definition', 'research'];
+  if (known.includes(declaredFormat)) {
+    queryType = declaredFormat;
+    // safety: a declared layout that has no content falls back to research
+    if (queryType === 'comparison' && !table.length) queryType = 'research';
+    if (queryType === 'code' && !codeBlocks.length) queryType = 'research';
+  } else {
+    // Fallback for old history / chat / tool replies with no "## Format": strict, structure-only checks
+    const stepLike = findings.filter(item => /^step\s*\d+/i.test(item)).length;
+    if (codeBlocks.length) queryType = 'code';
+    else if (table.length) queryType = 'comparison';
+    else if (findings.length >= 2 && stepLike >= findings.length / 2) queryType = 'howto';
+    else if (!raw.includes('##') && raw.split('\n').length < 6 && findings.length === 0) queryType = 'chat';
+  }
+  // FIX: HowToResult already prints "Step N", so strip the model's own "Step N:" prefix
+  if (queryType === 'howto') findings = findings.map(item => item.replace(/^step\s*\d+\s*[:.\-–]\s*/i, ''));
 
   return { summary, findings, sources, confidence, table, codeBlocks, queryType };
 }

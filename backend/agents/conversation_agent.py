@@ -1,3 +1,4 @@
+import re  # FIX: for detect_format()
 from settings import BASE_MODEL, CHAT_MODEL
 from state import AgentState
 from tools.llm import generate
@@ -11,15 +12,70 @@ def build_context(results: list) -> str:
         context += f"\n[Task {r['task_id']} - {r['type']}]\n{r['response']}\n"
     return context
 
-def is_code_query(query: str) -> bool:
-    """Detect if the user wants code output."""
-    keywords = ['write', 'code', 'program', 'function', 'script', 'implement',
-                'algorithm', 'snippet', 'example code', 'show me how to',
-                'python', 'javascript', 'java', 'c++', 'sql', 'bash']
-    q = query.lower()
-    return any(k in q for k in keywords)
+# FIX: the old is_code_query() used substring matching, so "PostgreSQL" matched "sql",
+# "JavaScript" matched "java", "description" matched "script", etc. Any such query
+# was forced into the code prompt (hardcoded Python output + fake docs.python.org source).
+# Now: word-boundary regexes, evaluated in priority order, and the chosen format is
+# also appended to the answer as "## Format" so the frontend does not have to guess.
+_CODE_VERB = r"(write|implement|code|create|generate|build|debug|fix|refactor)"
+_CODE_NOUN = r"(code|script|snippet|function|program|algorithm|regex|class|query|api|endpoint)"
 
-def build_summarize_prompt(state: AgentState) -> str:
+def detect_format(query: str) -> str:
+    q = query.lower().strip()
+    if (re.search(rf"\b{_CODE_VERB}\b.{{0,40}}\b{_CODE_NOUN}\b", q)
+            or re.search(r"\b(code (for|to)|in (python|javascript|java|c\+\+|bash|sql|typescript)\b)", q)
+            or re.search(r"\b(sql|python|javascript|bash|regex|java)\b.{0,25}\b(query|script|function|snippet|code|program)\b", q)  # FIX: "sql query to ..."
+            or re.search(r"\bimplement\b", q)):
+        return "code"
+    if re.search(r"\b(vs\.?|versus|compare|comparison|difference between|differences between|better than|pros and cons)\b", q):
+        return "comparison"
+    if re.search(r"\b(step[- ]by[- ]step|how (do|to|can|should) |steps? (to|for)|tutorial|roadmap|in \w+ steps)\b", q) \
+            or re.search(r"\bguide (to|for|me)\b", q):
+        return "howto"
+    if re.search(r"\b(top \d+|\d+ (best|good|great|top)|best|list of|ranking|ranked|recommend\w*)\b", q):
+        return "list"
+    # FIX: "what are the latest developments..." is research, not a definition
+    if re.search(r"^(what is|what's|who is|define|explain|meaning of)\b", q) and len(q.split()) <= 9 \
+            and not re.search(r"\b(latest|recent|new|news|trends?|developments?|20\d\d)\b", q):
+        return "definition"
+    return "research"
+
+FORMAT_RULES = {
+    "code": """The user asked for code. Use this layout:
+## Summary
+One or two sentences on what the code does, then ONE fenced code block with a language tag.
+## Key Findings
+2-3 short lines explaining how it works. NO code in this section.""",
+    "comparison": """The user asked for a comparison. Use this layout:
+## Summary
+2-3 sentences with the verdict. Inline citations like [https://source.com].
+## Comparison
+A markdown table is REQUIRED. First column = the items compared, other columns = criteria. 4-7 criteria.
+## Key Findings
+2-4 bullet takeaways (when to pick which). Each ends with a citation.""",
+    "howto": """The user asked for steps / a how-to. Use this layout:
+## Summary
+2 sentences on the goal and approach.
+## Key Findings
+Numbered list. EVERY item must start with "Step N:" (e.g. "1. Step 1: Install ..."). Respect any step count the user asked for.""",
+    "list": """The user asked for a list / recommendations. Use this layout:
+## Summary
+2 sentences.
+## Key Findings
+Numbered list (1. 2. 3.). Respect any count the user asked for (e.g. top 5). Each item ends with a citation.""",
+    "definition": """The user asked for an explanation. Use this layout:
+## Summary
+2-3 plain-language sentences.
+## Key Findings
+2-4 short points worth knowing. Each ends with a citation.""",
+    "research": """The user asked an open research question. Use this layout:
+## Summary
+2-3 sentences directly answering the query with inline citations.
+## Key Findings
+3-6 bullet points (dashes), each one specific fact with numbers/dates/names and a citation.""",
+}
+
+def build_summarize_prompt(state: AgentState, fmt: str = "research") -> str:  # FIX: fmt passed in
     subtasks = state['subtasks']
     idx = len(subtasks) - 1
     task = subtasks[idx]
@@ -27,85 +83,25 @@ def build_summarize_prompt(state: AgentState) -> str:
     original_query = state.get('query', task.get('goal', ''))
     summarize_goal = task.get('goal', '')
 
-    # Code query — completely different format, no findings grid
-    if is_code_query(original_query):
-        return f"""{context}
-
-The user asked for code. Write a clean, direct response using EXACTLY these sections:
-
-## Summary
-One sentence explaining what the code does.
-
-## Key Findings
-Write a single item — the complete code solution with explanation:
-1. Here is the complete solution: [brief explanation]
-
-Then put the full code block in the Summary section itself, after the explanation sentence, like this:
-
-## Summary
-[explanation sentence]
-
-```python
-# full code here
-```
-
-## Sources
-- https://docs.python.org
-
-## Confidence
-High
-
-Rules:
-- Put the FULL code block inside ## Summary, after the explanation
-- ## Key Findings should have at most 2-3 lines explaining what the code does — NO code fragments
-- Never split code across multiple findings items
-- Always use proper markdown code fences with language tag
-
-Original user query: {original_query}"""
-
     return f"""{context}
 
-Based on the research findings above, write a structured answer using EXACTLY these markdown sections:
+Write the final answer using ONLY the markdown ## sections below. Required output format: {fmt.upper()}.
 
-## Summary
-Write 2-3 sentences directly answering the query. Add inline citations after each specific claim like this: [https://source.com]
-
-## Key Findings
-IMPORTANT: Respect the user's requested output format exactly.
-- If the user asked for a numbered list, use numbered items (1. 2. 3. ...)
-- If the user asked for a ranked list or "top N" list, number each item and include scores/ratings
-- If the user asked for bullet points, use dashes (- item)
-- Each item should be on its own line
-- Each item must end with an inline citation [https://source.com]
-(Skip this section entirely if there is only one finding or if this is a simple one-sentence factual query)
-
-## Comparison
-(Include ONLY if the query explicitly compares multiple items, products, options, or candidates)
-Use a clean markdown table. For subjective columns like Performance, Quality, Value: use ★★★★☆ star ratings (5 stars max).
-| Item | Metric1 | Metric2 | Price |
-|------|---------|---------|-------|
-| ...  | ...     | ...     | ...   |
-(Skip this section entirely if not comparing multiple items)
+{FORMAT_RULES[fmt]}
 
 ## Sources
-List each unique source URL on its own line:
-- https://source1.com
-- https://source2.com
+Unique source URLs taken from the research above, one per line as "- https://...". If the research has no URLs, omit this section. Never invent URLs.
 
 ## Confidence
-High
-
-(Replace "High" with Medium or Low based on source quality and consistency across sources)
+High, Medium or Low (based on source quality and agreement). If no search results were available, use Low.
 
 Rules:
-- ALWAYS output Summary, Sources, and Confidence sections
-- Use EXACTLY the ## headings shown above — no other headings, no sub-headings
-- Be specific: include names, numbers, dates, specs, and prices where available
-- Every factual claim in Summary and Key Findings MUST have an inline citation [https://url]
-- The output format in Key Findings MUST match what the user requested (list, numbered, table, steps, etc.)
+- Use EXACTLY these ## headings, no others, no sub-headings.
+- Be specific: names, numbers, dates, prices.
+- Never call tools. Use only the research above.
 
 Summarize goal: {summarize_goal}
-Original user query (use this to determine the correct output format): {original_query}"""
+Original user query: {original_query}"""
 
 def converse(state: AgentState):
     history = format_history(state.get('chat_history', []))
@@ -153,10 +149,13 @@ def summarize(state: AgentState):
         idx = len(subtasks) - 1
 
     task = subtasks[idx]
-    prompt = build_summarize_prompt(state)
+    fmt = detect_format(state.get('query', ''))  # FIX: deterministic format from the user's query
+    prompt = build_summarize_prompt(state, fmt)
 
     print("Summarizing |", end=" ", flush=True)
     response = generate(prompt, BASE_MODEL)
+    # FIX: tell the frontend which layout to render (it parses "## Format")
+    response = response.rstrip() + f"\n\n## Format\n{fmt}"
 
     state['results'].append({
         "task_id": task.get("id"),
